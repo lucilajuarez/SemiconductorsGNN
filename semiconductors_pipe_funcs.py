@@ -128,33 +128,48 @@ def get_xyz_tensors(database):
 
     return np.asarray(XYZ_arrays)
 
+
+
+  
 def connectivity(tensor, d_max):
     """Takes in a single xyz array produced by the get_xyz_tensor function and a value d_max for the maximum distance
     between connected atoms. Returns the connectivity set and their corresponding connection weights"""
 
-    sample_size = tensor.shape[0]
 
-    connectivity_set = []
-    connection_weights = []
+    coords = tensor[:, -3:]
+    diff = coords[:, None, :] - coords[None, :, :]     # shape (N, N, 3)
+    dist2 = (diff ** 2).sum(-1)                        # squared distances
+    mask = (dist2 > 0) & (dist2 < d_max**2)
+    i_idx, j_idx = mask.nonzero()
+    edge_index = np.stack([i_idx, j_idx], axis=1)
+    edge_weight = 1.0 / dist2[mask]
 
-    for i in range(sample_size):
-        for j in range(sample_size):
+    return edge_index, edge_weight
 
-            v1 = tensor[i][-3:]
-            v2 = tensor[j][-3:]
+    
+    # sample_size = tensor.shape[0]
+    # connectivity_set = []
+    # connection_weights = []  
+    # for i in range(sample_size):
+    #     for j in range(sample_size):
 
-            aa = 0.01*tensor[i][0]*tensor[j][0]  ### Scaled product of atomic numbers
+    #         v1 = tensor[i][-3:]
+    #         v2 = tensor[j][-3:]
 
-            diff = v1 - v2
-            distance = np.sqrt(np.dot(diff, diff))
+    #         aa = 0.01*tensor[i][0]*tensor[j][0]  ### Scaled product of atomic numbers
 
-            if distance > 0.0 and distance < d_max:
-                connectivity_set.append(np.array([i,j], dtype=np.int64))
-                connectivity_set.append(np.array([j,i], dtype=np.int64))
-                connection_weights.append(np.array(1.0/distance**2))
-                connection_weights.append(np.array(1.0/distance**2))
+    #         diff = v1 - v2
+    #         distance = np.sqrt(np.dot(diff, diff))
 
-    return np.asarray(connectivity_set, dtype=np.int64), np.asarray(connection_weights)
+    #         if distance > 0.0 and distance < d_max:
+    #             connectivity_set.append(np.array([i,j], dtype=np.int64))
+    #             connectivity_set.append(np.array([j,i], dtype=np.int64))
+    #             connection_weights.append(np.array(1.0/distance**2))
+    #             connection_weights.append(np.array(1.0/distance**2))
+
+    #return np.asarray(connectivity_set, dtype=np.int64), np.asarray(connection_weights)
+
+
 
 def onehot(database, column_name):
     "One-hot-encode column_name as separate columns"
@@ -206,7 +221,7 @@ def my_pipeline(data: pd.DataFrame):
 
     X_data = data
     y_data = X_data[['E','Bandgap']]
-    y_data['Bandgap'] = 0.1*y_data['Bandgap']
+    y_data['Bandgap'] = y_data['Bandgap'].mul(0.1)
 
     X_data.drop(['E'], axis=1, inplace=True)
     X_data.drop(['Bandgap'], axis=1, inplace=True)
@@ -256,9 +271,9 @@ def create_datalist(X,y, d_max=4.0):
       edge_weight = torch.from_numpy(c_dist).float()
 
       if y is not None:
-        data = Data(x= element_encoded, edge_index= edge_index, edge_weight= edge_weight, graph_attr= graph_attr, y= ys)
+        data = Data(x= element_encoded, edge_index= edge_index, edge_attr= edge_weight, graph_attr= graph_attr, y= ys)
       else:
-        data = Data(x= element_encoded, edge_index= edge_index, edge_weight= edge_weight, graph_attr= graph_attr)
+        data = Data(x= element_encoded, edge_index= edge_index, edge_attr= edge_weight, graph_attr= graph_attr)
 
       data = dtype_2check(data)
 
