@@ -36,27 +36,47 @@ def dtype_2check(data):
         data.edge_index = data.edge_index.long()
     return data
 
-def unify_xyz_shape(n_at, vec, latt_vec, xyz):
+def gaussian_rbf(dist2, num_centers=32, cutoff=6.0, sigma=0.5):
+    """ dist2: array of squared distances, returns: array (..., num_centers)"""
+    
+    # centers in real distance space
+    centers = np.linspace(0, cutoff, num_centers)
+    dist = np.sqrt(dist2)[..., np.newaxis] 
+
+    diff2 = (dist - centers)**2
+
+    gamma = 1.0 / (sigma**2)
+    
+    return np.exp(-gamma * diff2)
+
+
+def unify_xyz_shape(n_at, vec, latt_vec, xyz, element):
     """Extends the supercell size to 240 atoms (least common multiple among the sizes) creating new atomic coordinates
     according to the lattice vectors. Notice that if you use this function you need to rescale the lattice in the graph attributes database"""
+    elements = []
 
     xyz.append(vec)
     xyz.append(vec + latt_vec[0])
     xyz.append(vec + latt_vec[1])
+    elements += [element]*3
 
     if n_at < 80:
         xyz.append(vec + latt_vec[0] + latt_vec[1])
+        elements += [element]      
     if n_at < 60:
         xyz.append(vec + 2.0*latt_vec[0])
         xyz.append(vec + 2.0*latt_vec[1])
+        elements += [element]*2
     if n_at < 40:
         xyz.append(vec + 2.0*latt_vec[0] + latt_vec[1])
         xyz.append(vec + latt_vec[0] + 2.0*latt_vec[1])
+        elements += [element]*2
     if n_at < 30:
         xyz.append(vec + 2.0*latt_vec[0] + 2.0*latt_vec[1])
         xyz.append(vec + latt_vec[2])
         xyz.append(vec + latt_vec[0] + latt_vec[2])
         xyz.append(vec + latt_vec[1] + latt_vec[2])
+        elements += [element]*4
     if n_at < 20:
         xyz.append(vec + latt_vec[0] + latt_vec[1] + latt_vec[2])
         xyz.append(vec + 2.0*latt_vec[0] + latt_vec[1] + latt_vec[2])
@@ -70,72 +90,91 @@ def unify_xyz_shape(n_at, vec, latt_vec, xyz):
         xyz.append(vec + 2.0*latt_vec[0] + latt_vec[1] + 2.0*latt_vec[2])
         xyz.append(vec + latt_vec[0] + 2.0*latt_vec[1] + 2.0*latt_vec[2])
         xyz.append(vec + 2.0*latt_vec[0] + 2.0*latt_vec[1] + 2.0*latt_vec[2])
+        elements += [element]*12
 
-    return xyz
+    return xyz, elements
 
-def get_xyz_tensors(database):
-    """Gets the atom elements and xyz coordinates from geometry files in train and test directories and creates
+def get_xyz_tensor(structure_id,element_encoding=0,train=True,unify_shape=True):
+    """Gets the atom elements and xyz coordinates from the geometry file and creates
     numpy array of one-hot encoding element followed by its x, y, z coordinates. It uses unify_xyz_shape fuction
-    to add atoms according to the extended supercell. Returns an array of of arrays (one per structure in the directory)"""
+    to add atoms according to the extended supercell."""
 
-    ids  = database.index.values
-    if ids.size > 1000:
-        path = "/train/{}/geometry.xyz"
-    else: path = "/test/{}/geometry.xyz"
+    if element_encoding not in (0, 1, 2):
+        raise ValueError(f"Invalid element_encoding={element_encoding}. Must be 0, 1, or 2.")
 
-    XYZ_arrays = []
+    n_enc = 2 - element_encoding
 
-    for i in ids:
-        file = path.format(i)
+    if train == True:
+        file = "/train/{}/geometry.xyz".format(structure_id)
+    else:
+        file = "/test/{}/geometry.xyz".format(structure_id)
 
-        xyz = []
-        latt_vec = []
+    xyz = []
+    latt_vec = []
+    elements_list = []
 
-        n_at = sum(1 for _ in open(file)) - 6
+    n_at = sum(1 for _ in open(file)) - 6
 
-        with open(file) as f:
-            for line in f.readlines():
+    with open(file) as f:
+      for line in f.readlines():
 
-                if line.rfind("atom")==-1 and line.rfind("lattice_vector")==-1: continue
+        if "atom" not in line and "lattice_vector" not in line: continue
 
-                x = line.split(' ')
+        x = line.split(' ')
 
-                ## SAVE LATTICE VECTORS
-                if line.rfind("lattice_vector")!=-1:
-                    vec = np.array([0, 0, 0, 0, 0, 0, x[1], x[2], x[3] ], dtype=float)
-                    latt_vec.append(vec)
+        ## SAVE LATTICE VECTORS
+        if "lattice_vector" in line:
+            v = np.array([0, 0, 0, 0, 0, 0, x[1], x[2], x[3] ], dtype=float)
+            vec = v[n_enc:]
+            latt_vec.append(vec)
+            continue
 
-                ### SAVE XYZ COORDS
-                if line.rfind("Al")!=-1:
-                    vec = np.array([13, 1.61, 1, 0, 0, 0 , x[1], x[2], x[3] ], dtype=float)  ### Atomic number, electronegativity, element one-hot encoding (4), x, y, z coords.
-                    xyz = unify_xyz_shape(n_at=n_at, vec=vec, latt_vec=latt_vec, xyz=xyz)
+        ### SAVE XYZ COORDS
+        ### Scaled Atomic number, electronegativity, element one-hot encoding (4), x, y, z coords.
+        elif "Al" in line:
+            element="Al"
+            v = np.array([0.13, 1.61, 1, 0, 0, 0 , x[1], x[2], x[3] ], dtype=float)  
 
-                if line.rfind("Ga")!=-1:
-                    vec = np.array([31, 1.81, 0, 1, 0, 0 , x[1], x[2], x[3] ], dtype=float)
-                    xyz = unify_xyz_shape(n_at=n_at, vec=vec, latt_vec=latt_vec, xyz=xyz)
+        elif "Ga" in line:
+            element="Ga"
+            v = np.array([0.31, 1.81, 0, 1, 0, 0 , x[1], x[2], x[3] ], dtype=float)
 
-                if line.rfind("In")!=-1:
-                    vec = np.array([49, 1.78, 0, 0, 1, 0 , x[1], x[2], x[3] ], dtype=float)
-                    xyz = unify_xyz_shape(n_at=n_at, vec=vec, latt_vec=latt_vec, xyz=xyz)
+        elif "In" in line:
+            element="In"
+            v = np.array([0.49, 1.78, 0, 0, 1, 0 , x[1], x[2], x[3] ], dtype=float)
 
-                if line.rfind("O") !=-1:
-                    vec = np.array([16, 3.44, 0, 0, 0, 1 , x[1], x[2], x[3] ], dtype=float)
-                    xyz = unify_xyz_shape(n_at=n_at, vec=vec, latt_vec=latt_vec, xyz=xyz)
+        elif "O" in line:
+            element="O"
+            v = np.array([0.16, 3.44, 0, 0, 0, 1 , x[1], x[2], x[3] ], dtype=float)
 
+        else: continue        
+        
+        vec = v[n_enc:]
+        if unify_shape==True:
+            new_elements = []
+            xyz , new_elements = unify_xyz_shape(n_at=n_at, vec=vec, latt_vec=latt_vec, xyz=xyz, element=element)
+            elements_list += new_elements
+        else: 
+            xyz.append(vec)
+            elements_list += [element]     
+    
+    # print("you have {} sets of coords and {} elements".format(len(xyz),len(elements)))
+    # print("the elements list contains {} Al, {} Ga, {} In and {} O atoms'".format(elements.count("Al"),\
+    #                                                                                elements.count("Ga"),\
+    #                                                                                 elements.count("In"),\
+    #                                                                                   elements.count("O")))
 
-        XYZ_arrays.append(np.asarray(xyz))
-
-
-    return np.asarray(XYZ_arrays)
+    return np.asarray(xyz), elements_list
 
 
 
   
-def connectivity(tensor, d_max):
+def connectivity(tensor, d_max, bond_encoding):
     """Takes in a single xyz array produced by the get_xyz_tensor function and a value d_max for the maximum distance
-    between connected atoms. Returns the connectivity set and their corresponding connection weights"""
+    between connected atoms. Returns the connectivity set and their corresponding connection weights (bond_encoding=0) 
+    or its encoding gaussian radial basis (bond_encoding>0)"""
 
-
+    ## COMPUTE DISTACES BETWEEN ATOMS AND SET EDGE WEIGHT TO INVERSE SQUARE
     coords = tensor[:, -3:]
     diff = coords[:, None, :] - coords[None, :, :]     # shape (N, N, 3)
     dist2 = (diff ** 2).sum(-1)                        # squared distances
@@ -144,30 +183,18 @@ def connectivity(tensor, d_max):
     edge_index = np.stack([i_idx, j_idx], axis=1)
     edge_weight = 1.0 / dist2[mask]
 
-    return edge_index, edge_weight
+    ## ENCODE DISTANCE IN GAUSSIAN RADIAL BASIS 
+    if bond_encoding > 0:
 
-    
-    # sample_size = tensor.shape[0]
-    # connectivity_set = []
-    # connection_weights = []  
-    # for i in range(sample_size):
-    #     for j in range(sample_size):
+        d2 = dist2[mask]
 
-    #         v1 = tensor[i][-3:]
-    #         v2 = tensor[j][-3:]
+        edge_attr = gaussian_rbf(d2, num_centers=10, cutoff=d_max, sigma=0.5)
+        
+        return edge_index, edge_attr
 
-    #         aa = 0.01*tensor[i][0]*tensor[j][0]  ### Scaled product of atomic numbers
-
-    #         diff = v1 - v2
-    #         distance = np.sqrt(np.dot(diff, diff))
-
-    #         if distance > 0.0 and distance < d_max:
-    #             connectivity_set.append(np.array([i,j], dtype=np.int64))
-    #             connectivity_set.append(np.array([j,i], dtype=np.int64))
-    #             connection_weights.append(np.array(1.0/distance**2))
-    #             connection_weights.append(np.array(1.0/distance**2))
-
-    #return np.asarray(connectivity_set, dtype=np.int64), np.asarray(connection_weights)
+    else:
+        edge_attr = np.expand_dims(edge_weight, axis=1)
+        return edge_index, edge_attr
 
 
 
@@ -200,83 +227,97 @@ def rescale_lattice(row):
     return row
 
 def my_pipeline(data: pd.DataFrame):
-  """ Takes the original pd.Dataframe object train or test, renames its columns, one-hot encodes the spacegroup, rescales the lattice vectors,
-  removes unnecessary columns and returns curated graph features X_data and targets y_data if avaliable (returns y_data None for test)"""
+    """ Takes the original pd.Dataframe object train or test, renames its columns, one-hot encodes the spacegroup, rescales the lattice vectors,
+    removes unnecessary columns and returns curated graph features X_data and targets y_data if avaliable (returns y_data None for test)"""
 
-  data.rename(columns={ 'number_of_total_atoms' : 'Natoms', 'percent_atom_al' : 'x_Al',
+    data.rename(columns={ 'number_of_total_atoms' : 'Natoms', 'percent_atom_al' : 'x_Al',
                        'percent_atom_ga' : 'x_Ga', 'percent_atom_in' : 'x_In','lattice_vector_1_ang' : 'l1',
                         'lattice_vector_2_ang' : 'l2','lattice_vector_3_ang' : 'l3',
                         'lattice_angle_alpha_degree' : 'a','lattice_angle_beta_degree' : 'b',
                         'lattice_angle_gamma_degree' : 'g'}, inplace=True)
 
 
-  data = onehot( data, "spacegroup" )
-  data.drop(['a'], axis=1, inplace=True)
-  data.drop(['b'], axis=1, inplace=True)
-  data.drop(['g'], axis=1, inplace=True)
+    data = onehot( data, "spacegroup" )
 
-  if 'formation_energy_ev_natom' in data.columns and "bandgap_energy_ev" in data.columns:
+    if 'formation_energy_ev_natom' in data.columns and "bandgap_energy_ev" in data.columns:
 
-    data.rename(columns={'formation_energy_ev_natom' : 'E','bandgap_energy_ev' : 'Bandgap'}, inplace = True)
+        data.rename(columns={'formation_energy_ev_natom' : 'E','bandgap_energy_ev' : 'Egap'}, inplace = True)
 
-    X_data = data
-    y_data = X_data[['E','Bandgap']]
-    y_data['Bandgap'] = y_data['Bandgap'].mul(0.1)
+        X_data = data
+        y_data = X_data[['E','Egap']]
+        y_data.loc[:, 'Egap'] *= 0.1
 
-    X_data.drop(['E'], axis=1, inplace=True)
-    X_data.drop(['Bandgap'], axis=1, inplace=True)
+        X_data.drop(['E'], axis=1, inplace=True)
+        X_data.drop(['Egap'], axis=1, inplace=True)
 
-  else:
-
-    X_data = data
-    y_data = None
-
-  X_data.apply(rescale_lattice, axis='columns')
-  X_data["l1"] = 0.01*X_data["l1"]
-  X_data["l2"] = 0.01*X_data["l2"]
-  X_data["l3"] = 0.01*X_data["l3"]
-
-  X_data.drop(['Natoms'], axis=1, inplace=True)
+        
 
 
-  return X_data, y_data
+    else:
 
-def create_datalist(X,y, d_max=4.0):
+        X_data = data
+        y_data = None
+
+    X_data.apply(rescale_lattice, axis='columns')
+
+    cols_to_scale = ['a', 'b', 'g', 'l1', 'l2', 'l3']
+
+    X_data[cols_to_scale] = (X_data[cols_to_scale] - X_data[cols_to_scale].min()) / (X_data[cols_to_scale].max() - X_data[cols_to_scale].min())
+
+    X_data.drop(['Natoms'], axis=1, inplace=True)
+
+    X_data.drop(['a'], axis=1, inplace=True)
+    X_data.drop(['b'], axis=1, inplace=True)
+    X_data.drop(['g'], axis=1, inplace=True)
+
+
+    return X_data, y_data
+
+
+
+
+def create_datalist(X, y, d_max=4.0, element_encoding=0, bond_encoding=0, train=True):
   """Takes in a curated pd.DataFrame of graph attributes X and targets y and an optional value in Angstroms
-  for the maximum distance of connection between atoms d_max (default set to d_max = 4.0). It uses the functions get_xyz_tensors
-  and connectivity, and returns a data list of pythorch geometric Data objects with node feature vector x,
-  edge_index, edge_weight, graph attributes and y values if available (it also works for train and test)"""
+  for the maximum distance of connection between atoms d_max (default set to d_max = 4.0).
+  returns a data list of pythorch geometric Data objects with node feature vector x,
+  edge_index, edge_attributes, graph_attributes and y values if available.
+   You can turn on element_encoding=1 to include the electronegativity and element_encoding=2 to 
+   further include the atomic number in the node features
+   You can turn on bond_encoding>0 to include a one-hot encoding of the bond type based on the 
+   possible bond pairs.
+  (it works for train and test but YOU MUST USE train=False FOR TEST LIST)"""
 
-  print("creating list of Data objects using d_max={}".format(d_max))
+  print("YOU MUST USE train=False FOR BUILDING A TEST LIST")
+  print("creating list of Data objects using d_max={},element_encoding={},bond_encoding={}".format(d_max,element_encoding,bond_encoding))
 
-  full_tensor = get_xyz_tensors(X)
-
+  ids = X.index.values
   data_list = []
 
-  for i in range(full_tensor.shape[0]):
+  for i in range(len(ids)):
+    structure_id = ids[i]
+      
+    ## GRAPH FEATURES
+    graph_attr = torch.tensor(X.iloc[i].values,dtype=torch.float32).unsqueeze(0)
 
-      ## GRAPH FEATURES
-      graph_attr = torch.tensor([X.iloc[i]],dtype=torch.float32)
+    if y is not None:
+        ys = torch.tensor(y.iloc[i].values,dtype=torch.float32).unsqueeze(0)
 
-      if y is not None:
-        ys = torch.tensor([y.iloc[i]],dtype=torch.float32)
+    ## NODE FEATURES
+    atoms_encoded, elements_list = get_xyz_tensor(structure_id ,element_encoding=element_encoding,train=train)
+    element_encoded = torch.from_numpy(atoms_encoded[:,:-3]).float()
 
-      ## NODE FEATURES
-      my_tensor = full_tensor[i]
-      element_encoded = torch.from_numpy(my_tensor[:,:-3]).float()
+    ## EDGE FEATURES
+    c_set, c_attr = connectivity(atoms_encoded, d_max=d_max, bond_encoding=bond_encoding)
+    edge_index = torch.from_numpy(c_set).T.long()
+    edge_attr = torch.from_numpy(c_attr).float()
 
-      ## EDGE FEATURES
-      c_set, c_dist = connectivity(my_tensor, d_max)
-      edge_index = torch.from_numpy(c_set).T.long()
-      edge_weight = torch.from_numpy(c_dist).float()
+    if y is not None:
+        data = Data(x= element_encoded, edge_index= edge_index, edge_attr= edge_attr, graph_attr= graph_attr, y= ys)
+    else:
+        data = Data(x= element_encoded, edge_index= edge_index, edge_attr= edge_attr, graph_attr= graph_attr)
 
-      if y is not None:
-        data = Data(x= element_encoded, edge_index= edge_index, edge_attr= edge_weight, graph_attr= graph_attr, y= ys)
-      else:
-        data = Data(x= element_encoded, edge_index= edge_index, edge_attr= edge_weight, graph_attr= graph_attr)
+    data = dtype_2check(data)
 
-      data = dtype_2check(data)
-
-      data_list.append(data)
+    data_list.append(data)
 
   return data_list
